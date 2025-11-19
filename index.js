@@ -5,123 +5,170 @@ const fs = require('fs');
 
 puppeteer.use(StealthPlugin());
 const app = express();
-app.use(express.json({ limit: '50mb' })); // Ekran görüntüsü için limit artırıldı
+app.use(express.json({ limit: '50mb' }));
 
+const USER_DATA_DIR = './chrome_data'; 
 const COOKIE_PATH = './cookies.json';
 let globalBrowser = null;
-let globalPage = null;
 
-// Tarayıcı Başlatıcı
+// İNSAN GİBİ MOUSE HAREKETİ (Mouse Jiggler)
+async function humanMove(page, element) {
+    const box = await element.boundingBox();
+    const x = box.x + (box.width / 2);
+    const y = box.y + (box.height / 2);
+    
+    // Rastgele sapmalarla hedefe git
+    await page.mouse.move(x + 10, y + 10, { steps: 25 });
+    await page.mouse.move(x, y, { steps: 10 });
+    await new Promise(r => setTimeout(r, Math.random() * 500 + 200)); // Biraz bekle
+}
+
+// CLOUDFLARE KUTUSUNU BUL VE TIKLA
+async function solveCloudflare(page) {
+    try {
+        console.log("Cloudflare kontrolü yapılıyor...");
+        await new Promise(r => setTimeout(r, 3000));
+
+        // Sayfadaki iframe'leri kontrol et (Turnstile genellikle iframe içindedir)
+        const frames = page.frames();
+        let clicked = false;
+
+        for (const frame of frames) {
+            // Doğrulama kutusu genellikle bu selector'da olur
+            try {
+                const checkbox = await frame.$('input[type="checkbox"]');
+                if (checkbox) {
+                    console.log("Doğrulama kutusu bulundu! İnsan gibi tıklanıyor...");
+                    await humanMove(page, checkbox);
+                    await checkbox.click();
+                    clicked = true;
+                    break; 
+                }
+                
+                // Alternatif Cloudflare yapısı (Shadow DOM)
+                const body = await frame.$('body');
+                if(body) {
+                    const text = await frame.evaluate(el => el.innerText, body);
+                    if(text.includes('Verify') || text.includes('human')) {
+                        console.log("Verify yazısı bulundu, ortasına tıklanıyor...");
+                        await humanMove(page, body);
+                        await body.click();
+                        clicked = true;
+                        break;
+                    }
+                }
+            } catch (e) {}
+        }
+
+        if(clicked) {
+            console.log("Tıklandı. Sonuç bekleniyor...");
+            await new Promise(r => setTimeout(r, 5000)); // Geçişi bekle
+        } else {
+            console.log("Tıklanacak kutu bulunamadı, belki de çıkmamıştır.");
+        }
+
+    } catch (e) {
+        console.log("Cloudflare çözümleme hatası: " + e.message);
+    }
+}
+
 async function startBrowser() {
     return await puppeteer.launch({
         headless: "new",
+        userDataDir: USER_DATA_DIR,
         args: [
             '--no-sandbox', 
             '--disable-setuid-sandbox', 
             '--disable-dev-shm-usage', 
             '--window-size=1920,1080',
-            '--disable-blink-features=AutomationControlled'
+            '--disable-blink-features=AutomationControlled',
+            '--start-maximized' // Tam ekran başlat
         ],
         executablePath: '/usr/bin/google-chrome'
     });
 }
 
-// 1. GİRİŞ YAPMA (Login)
+// 1. HER HESAP İÇİN GİRİŞ FONKSİYONU
 app.post('/login', async (req, res) => {
     const { username, password } = req.body;
     
     try {
-        // Önceki açık tarayıcı varsa kapat
         if (globalBrowser) await globalBrowser.close();
-        
-        console.log('Tarayıcı başlatılıyor...');
         globalBrowser = await startBrowser();
-        globalPage = await globalBrowser.newPage();
+        const page = await globalBrowser.newPage();
         
-        // Bot izlerini gizle
-        await globalPage.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36');
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36');
 
         console.log('Giriş sayfasına gidiliyor...');
-        // Timeout'u 60 saniye yapalım
-        await globalPage.goto('https://secure.sahibinden.com/giris', { waitUntil: 'networkidle2', timeout: 60000 });
+        await page.goto('https://secure.sahibinden.com/giris', { waitUntil: 'networkidle2', timeout: 60000 });
 
-        console.log('Cloudflare kontrolü için 5 saniye bekleniyor...');
-        await new Promise(r => setTimeout(r, 5000));
+        // Cloudflare Engeli Var mı? Varsa Çöz.
+        await solveCloudflare(page);
 
-        console.log('Kullanıcı bilgileri giriliyor...');
-        // Username alanını bekle
-        await globalPage.waitForSelector('#username', { visible: true, timeout: 15000 });
+        // Başlık kontrolü (Hala engel var mı?)
+        const title = await page.title();
+        if(title.includes("Just a moment") || title.includes("Security")) {
+             const shot = await page.screenshot({ encoding: 'base64' });
+             await globalBrowser.close();
+             return res.status(403).json({ 
+                 status: "error", 
+                 message: "Cloudflare kutusu aşılamadı.", 
+                 debug_image: `<img src="data:image/png;base64,${shot}" />` 
+             });
+        }
 
-        await globalPage.type('#username', username, { delay: 150 });
-        await globalPage.type('#password', password, { delay: 150 });
+        console.log('Giriş formu bekleniyor...');
+        try {
+            await page.waitForSelector('#username', { visible: true, timeout: 15000 });
+        } catch(e) {
+             const shot = await page.screenshot({ encoding: 'base64' });
+             await globalBrowser.close();
+             return res.status(500).json({ 
+                 status: "error", 
+                 message: "Giriş formu bulunamadı (Hala Cloudflare olabilir).", 
+                 debug_image: `<img src="data:image/png;base64,${shot}" />` 
+             });
+        }
+
+        console.log('Bilgiler yazılıyor...');
+        await page.type('#username', username, { delay: 150 });
+        await page.type('#password', password, { delay: 150 });
         
         await Promise.all([
-            globalPage.click('#userLoginSubmitButton'),
-            globalPage.waitForNavigation({ waitUntil: 'domcontentloaded' }),
+            page.click('#userLoginSubmitButton'),
+            page.waitForNavigation({ waitUntil: 'domcontentloaded' }),
         ]);
 
         // SMS Kontrolü
-        const content = await globalPage.content();
-        if (content.includes("Doğrulama Kodu") || content.includes("verification code") || content.includes("sms-verification")) {
-            console.log('SMS Doğrulaması İsteniyor!');
-            
-            // Ekran görüntüsü alıp n8n'e gönderelim ki emin olalım
-            const screenshot = await globalPage.screenshot({ encoding: 'base64' });
-            
-            return res.json({ 
-                status: "sms_required", 
-                message: "Lütfen /submit-sms adresine kodu gönderin.",
-                debug_image: `<img src="data:image/png;base64,${screenshot}" />`
-            });
+        const content = await page.content();
+        if (content.includes("Doğrulama Kodu") || content.includes("verification code")) {
+            console.log('SMS istendi.');
+            // Tarayıcıyı açık bırak (Global değişkende)
+            globalPage = page; 
+            return res.json({ status: "sms_required", message: "/submit-sms ile kodu gönderin." });
         }
 
-        // Başarılı ise cookie kaydet
-        const cookies = await globalPage.cookies();
+        // Başarılı
+        const cookies = await page.cookies();
         fs.writeFileSync(COOKIE_PATH, JSON.stringify(cookies, null, 2));
-        console.log('Giriş başarılı, cookie kaydedildi.');
         
         await globalBrowser.close();
         globalBrowser = null;
         
-        res.json({ status: "success", message: "Giriş başarılı." });
+        res.json({ status: "success", message: "Giriş Başarılı!" });
 
     } catch (error) {
-        console.error("Hata:", error.message);
-        let errorShot = "";
-        try {
-             if(globalPage) errorShot = await globalPage.screenshot({ encoding: 'base64' });
-        } catch(e) {}
-
-        // Hata olsa bile tarayıcıyı kapat
-        if(globalBrowser) {
-            await globalBrowser.close();
-            globalBrowser = null;
-        }
-
-        res.status(500).json({ 
-            status: "error", 
-            error: error.message,
-            debug_image: `<img src="data:image/png;base64,${errorShot}" />` 
-        });
+        if(globalBrowser) await globalBrowser.close();
+        res.status(500).json({ error: error.message });
     }
 });
 
-// 2. SMS GİRME (Submit SMS)
+// 2. SMS GİRME (Global Page Kullanır)
 app.post('/submit-sms', async (req, res) => {
     const { code } = req.body;
-    
-    // Dikkat: Bu fonksiyonun çalışması için /login'in tarayıcıyı kapatmamış olması gerekir.
-    // Ancak sunucusuz mimaride (Stateless) bu zordur.
-    // Bu yüzden basitlik adına; SMS gelince manuel giriş yapıp cookie'yi elle almayı veya
-    // Tarayıcıyı global değişkende tutmayı deniyoruz (yukarıda globalBrowser var).
-    
-    if (!globalBrowser || !globalPage) {
-        return res.status(400).json({ status: "error", message: "Aktif bir giriş oturumu yok. Lütfen tekrar /login isteği atın." });
-    }
+    if (!globalPage) return res.status(400).json({ error: "Aktif oturum yok." });
 
     try {
-        console.log(`SMS Kodu giriliyor: ${code}`);
-        // Input alanını bul (Genelde id='code' olur ama değişebilir, genel input arıyoruz)
         await globalPage.waitForSelector('input[type="text"]', { timeout: 5000 });
         await globalPage.type('input[type="text"]', code, { delay: 200 });
         
@@ -129,28 +176,24 @@ app.post('/submit-sms', async (req, res) => {
             globalPage.click('button[type="submit"]'), 
             globalPage.waitForNavigation({ waitUntil: 'networkidle2' })
         ]);
-
+        
         const cookies = await globalPage.cookies();
         fs.writeFileSync(COOKIE_PATH, JSON.stringify(cookies, null, 2));
-        
+
         await globalBrowser.close();
         globalBrowser = null;
-        
-        res.json({ status: "success", message: "SMS onaylandı ve cookie kaydedildi." });
-
+        res.json({ status: "success", message: "SMS Onaylandı." });
     } catch (error) {
-        console.error(error);
-        res.status(500).json({ status: "error", error: error.message });
+        res.status(500).json({ error: error.message });
     }
 });
 
-// 3. MESAJLARI OKUMA (Scraper)
+// 3. MESAJ OKUMA (Okunmamış Filtresiyle)
 app.post('/get-messages', async (req, res) => {
-    const { filter } = req.body; // 'unread' veya 'all'
+    const { filter } = req.body;
     let browser;
-
     try {
-        if (!fs.existsSync(COOKIE_PATH)) return res.status(401).json({ error: "Cookie yok! Önce /login yapın." });
+        if (!fs.existsSync(COOKIE_PATH)) return res.status(401).json({ error: "Giriş yapılmamış." });
         const cookies = JSON.parse(fs.readFileSync(COOKIE_PATH));
 
         browser = await startBrowser();
@@ -160,43 +203,34 @@ app.post('/get-messages', async (req, res) => {
 
         console.log('Mesajlara gidiliyor...');
         await page.goto('https://banaozel.sahibinden.com/mesajlarim', { waitUntil: 'domcontentloaded' });
+        
+        // Cloudflare tekrar çıkarsa çözmeyi dene
+        await solveCloudflare(page);
 
-        // Oturum düşmüş mü?
+        // Oturum kontrolü
         if (page.url().includes('giris')) {
-             return res.status(401).json({ status: "session_expired", message: "Oturum süresi dolmuş, tekrar /login yapın." });
+             await browser.close();
+             return res.status(401).json({ status: "session_expired", message: "Tekrar /login yapın." });
         }
 
-        await new Promise(r => setTimeout(r, 3000)); // Yükleme beklemesi
+        await page.waitForSelector('body');
 
         const messages = await page.evaluate(() => {
             const data = [];
-            const rows = document.querySelectorAll('tbody tr'); // Tablo satırları
-            
+            const rows = document.querySelectorAll('tbody tr');
             if (rows.length > 0) {
                 rows.forEach(row => {
-                    // Okunmamış mesaj kontrolü (class='unread' veya font-weight bold)
-                    // Sahibinden yapısına göre: genellikle 'unread' classı olur.
+                    // Okunmamış mesaj tespiti (Sahibinden'de genellikle 'unread' classı veya strong etiketi olur)
                     const isUnread = row.classList.contains('unread') || row.querySelector('strong') !== null;
-                    
                     const text = row.innerText.replace(/\n/g, ' | ').trim();
                     
-                    // Linki al (Cevap yazmak için lazım olacak)
-                    const linkEl = row.querySelector('a');
-                    const link = linkEl ? linkEl.href : null;
-
-                    data.push({ 
-                        raw: text, 
-                        isUnread: isUnread,
-                        link: link
-                    });
+                    if(text.length > 5) data.push({ raw: text, isUnread });
                 });
             }
             return data;
         });
 
-        // Filtreleme
         const finalData = (filter === 'unread') ? messages.filter(m => m.isUnread) : messages;
-
         res.json({ success: true, count: finalData.length, messages: finalData });
 
     } catch (error) {
@@ -206,46 +240,4 @@ app.post('/get-messages', async (req, res) => {
     }
 });
 
-// 4. CEVAP YAZMA (Reply)
-app.post('/send-reply', async (req, res) => {
-    const { messageLink, replyText } = req.body;
-    let browser;
-
-    try {
-        if (!fs.existsSync(COOKIE_PATH)) return res.status(401).json({ error: "Giriş yapılmamış" });
-        const cookies = JSON.parse(fs.readFileSync(COOKIE_PATH));
-
-        browser = await startBrowser();
-        const page = await browser.newPage();
-        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36');
-        await page.setCookie(...cookies);
-
-        console.log('Sohbet detayına gidiliyor...');
-        await page.goto(messageLink, { waitUntil: 'domcontentloaded' });
-        
-        await new Promise(r => setTimeout(r, 3000));
-
-        // Mesaj kutusu (Textarea)
-        const textareaSelector = 'textarea'; 
-        await page.waitForSelector(textareaSelector);
-        
-        await page.type(textareaSelector, replyText);
-        
-        console.log('Gönderiliyor...');
-        // Gönder butonu (Genelde id="send" veya class="btn-send")
-        // Garantilemek için "Gönder" yazan butonu arayalım veya genel buton
-        await page.click('button[type="submit"]'); 
-        
-        await new Promise(r => setTimeout(r, 3000)); // Gönderim beklemesi
-
-        res.json({ success: true, message: "Cevap gönderildi." });
-
-    } catch (error) {
-        console.error(error);
-        res.status(500).json({ success: false, error: error.message });
-    } finally {
-        if (browser) await browser.close();
-    }
-});
-
-app.listen(3000, () => console.log('Proxy V6.1 (Coolify Edition) Hazır.'));
+app.listen(3000, () => console.log('Proxy V7 (Cloudflare Hunter) Hazır.'));
