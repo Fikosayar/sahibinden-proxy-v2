@@ -7,38 +7,37 @@ puppeteer.use(StealthPlugin());
 const app = express();
 app.use(express.json({ limit: '50mb' }));
 
-// AYARLAR
-const USER_DATA_DIR = '/tmp/chrome_data_v9'; // Yeni temiz klasör
+const USER_DATA_DIR = '/tmp/chrome_data_v9_1'; 
 const COOKIE_PATH = '/tmp/cookies.json';
 
 // SCRAPE.DO AYARLARI
 const PROXY_SERVER = 'http://proxy.scrape.do:8080';
-const PROXY_USER = '5052db1d887f45fa9533370a97d6f6c4c3552fb1e9d'; // Senin Token'ın
-const PROXY_PASS = ''; // Şifre gerekmiyor genelde
+const PROXY_USER = '5052db1d887f45fa9533370a97d6f6c4c3552fb1e9d'; 
+const PROXY_PASS = ''; 
 
 let globalBrowser = null;
 let globalPage = null;
 
-// Tarayıcı Başlatma (Proxy Entegreli)
 async function startBrowser() {
-    console.log('>>> Tarayıcı (Scrape.do Proxy) başlatılıyor...');
+    console.log('>>> Tarayıcı (Scrape.do + SSL Bypass) başlatılıyor...');
     return await puppeteer.launch({
         headless: "new",
         userDataDir: USER_DATA_DIR,
+        ignoreHTTPSErrors: true, // <--- KRİTİK AYAR 1: SSL Hatalarını Yoksay
         args: [
             '--no-sandbox', 
             '--disable-setuid-sandbox', 
             '--disable-dev-shm-usage', 
             '--window-size=1920,1080',
             '--disable-blink-features=AutomationControlled',
-            // İŞTE SİHİRLİ KOMUT: Tüm trafiği Scrape.do üzerinden geçir
-            `--proxy-server=${PROXY_SERVER}`
+            `--proxy-server=${PROXY_SERVER}`,
+            '--ignore-certificate-errors', // <--- KRİTİK AYAR 2: Sertifika Hatalarını Yoksay
+            '--ignore-certificate-errors-spki-list '
         ],
         executablePath: '/usr/bin/google-chrome'
     });
 }
 
-// Sayfa açılınca Proxy'ye şifre ile giriş yap
 async function authProxy(page) {
     console.log('Proxy kimlik doğrulaması yapılıyor...');
     await page.authenticate({ 
@@ -57,26 +56,24 @@ app.post('/login', async (req, res) => {
         const page = await globalBrowser.newPage();
         globalPage = page;
 
-        // Önce Proxy'ye giriş yap
         await authProxy(page);
 
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
 
-        console.log('Giriş sayfasına gidiliyor (Proxy ile)...');
-        // Timeout'u uzun tutuyoruz çünkü Proxy bazen yavaş olabilir
+        console.log('Giriş sayfasına gidiliyor...');
+        
+        // Scrape.do bazen yavaş yanıt verebilir, timeout'u uzun tutalım
         await page.goto('https://secure.sahibinden.com/giris', { waitUntil: 'networkidle2', timeout: 120000 });
 
-        console.log('Sayfa yüklendi. Başlık kontrol ediliyor...');
+        console.log('Sayfa yüklendi, başlık kontrol ediliyor...');
         const title = await page.title();
         console.log(`Başlık: ${title}`);
 
-        // Cloudflare Engel Kontrolü
         if(title.includes("Just a moment")) {
              const shot = await page.screenshot({ encoding: 'base64' });
-             // Proxy olduğu için bekleyince geçebilir, hemen kapatmayalım
              return res.status(403).json({ 
                  status: "error", 
-                 message: "Proxy'ye rağmen Cloudflare çıktı. (Debug image'a bak)", 
+                 message: "Proxy'ye rağmen Cloudflare çıktı.", 
                  debug_image: `<img src="data:image/png;base64,${shot}" />` 
              });
         }
@@ -99,7 +96,6 @@ app.post('/login', async (req, res) => {
             page.waitForNavigation({ waitUntil: 'domcontentloaded' }),
         ]);
 
-        // SMS Kontrolü
         const content = await page.content();
         if (content.includes("Doğrulama Kodu") || content.includes("verification code")) {
             console.log('SMS istendi.');
@@ -111,7 +107,6 @@ app.post('/login', async (req, res) => {
             });
         }
 
-        // Cookie Kaydet
         const cookies = await page.cookies();
         fs.writeFileSync(COOKIE_PATH, JSON.stringify(cookies, null, 2));
         
@@ -131,11 +126,10 @@ app.post('/submit-sms', async (req, res) => {
     try {
         globalBrowser = await startBrowser();
         const page = await globalBrowser.newPage();
-        await authProxy(page); // Proxy login
+        await authProxy(page);
         
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         
-        // Oturum korunduğu için tekrar giriş sayfasına gidince kaldığı yerden devam etmeli
         await page.goto('https://secure.sahibinden.com/giris', { waitUntil: 'networkidle2' });
 
         await page.waitForSelector('input[type="text"]', { timeout: 15000 });
@@ -163,7 +157,7 @@ app.post('/get-messages', async (req, res) => {
 
         browser = await startBrowser();
         const page = await browser.newPage();
-        await authProxy(page); // Proxy login
+        await authProxy(page);
 
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         await page.setCookie(...cookies);
@@ -201,4 +195,4 @@ app.post('/get-messages', async (req, res) => {
     }
 });
 
-app.listen(3000, () => console.log('Proxy V9 (Scrape.do Integration) Hazır.'));
+app.listen(3000, () => console.log('Proxy V9.1 (SSL Bypass) Hazır.'));
