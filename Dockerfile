@@ -1,8 +1,8 @@
 FROM node:18-slim
 
-# Sanal Ekran (Xvfb) ve Chrome Kurulumu
+# Gerekli Chrome kütüphanelerini yükle (Xvfb olmadan, hafif kurulum)
 RUN apt-get update \
-    && apt-get install -y wget gnupg xvfb \
+    && apt-get install -y wget gnupg \
     && wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - \
     && sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list' \
     && apt-get update \
@@ -17,5 +17,7 @@ RUN npm install
 
 COPY . .
 
-# Sanal ekran başlatma scripti
-CMD xvfb-run --server-args="-screen 0 1280x1024x24" node index.js
+EXPOSE 3000
+
+# Standart başlatma (Sanal ekransız)
+CMD ["node", "index.js"]
