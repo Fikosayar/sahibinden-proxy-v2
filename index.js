@@ -7,19 +7,18 @@ puppeteer.use(StealthPlugin());
 const app = express();
 app.use(express.json({ limit: '50mb' }));
 
-const USER_DATA_DIR = '/tmp/chrome_data_v10_1'; 
+const USER_DATA_DIR = '/tmp/chrome_data_v10_2'; 
 const COOKIE_PATH = '/tmp/cookies.json';
 
-// --- WEBSHARE PROXY BİLGİLERİ ---
-const PROXY_IP = '64.137.96.74';   // (Senin Webshare IP'n)
-const PROXY_PORT = '6641';
+// --- WEBSHARE PROXY (ABD - Los Angeles) ---
+const PROXY_IP = '142.111.48.253'; 
+const PROXY_PORT = '7030';
 const PROXY_USER = 'punmxuuv';
 const PROXY_PASS = 'hqrh1cvutdb1';
 
 let globalBrowser = null;
 let globalPage = null;
 
-// İnsan Tıklaması (Cloudflare için - Gerekirse diye kalsın)
 async function humanClick(page, element) {
     try {
         const box = await element.boundingBox();
@@ -36,8 +35,7 @@ async function humanClick(page, element) {
 
 async function solveCloudflare(page) {
     console.log("🔍 Cloudflare Taraması...");
-    // Proxy yavaş olabilir, bekleme süresini artırdık
-    await new Promise(r => setTimeout(r, 6000)); 
+    await new Promise(r => setTimeout(r, 5000)); 
     const frames = page.frames();
     for (const frame of frames) {
         try {
@@ -60,7 +58,7 @@ async function solveCloudflare(page) {
 }
 
 async function startBrowser() {
-    console.log('>>> Tarayıcı (Residential Proxy) başlatılıyor...');
+    console.log('>>> Tarayıcı (US Proxy) başlatılıyor...');
     return await puppeteer.launch({
         headless: "new",
         userDataDir: USER_DATA_DIR,
@@ -84,7 +82,7 @@ app.post('/login', async (req, res) => {
         if (globalBrowser) await globalBrowser.close();
         globalBrowser = await startBrowser();
         const page = await globalBrowser.newPage();
-        globalPage = page; // SMS için global'e al
+        globalPage = page;
 
         console.log('Proxy girişi yapılıyor...');
         await page.authenticate({ username: PROXY_USER, password: PROXY_PASS });
@@ -92,9 +90,10 @@ app.post('/login', async (req, res) => {
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
 
         console.log('Giriş sayfasına gidiliyor...');
-        // Sayfa yükleme süresini 3 dakikaya (180000ms) çıkarıyoruz
-        await page.goto('https://secure.sahibinden.com/giris', { waitUntil: 'networkidle2', timeout: 180000 });
+        // İlk yükleme için 3 dakika veriyoruz
+        await page.goto('https://secure.sahibinden.com/giris', { waitUntil: 'domcontentloaded', timeout: 180000 });
 
+        // Cloudflare Kontrolü
         for(let i=0; i<3; i++) {
             const title = await page.title();
             if(title.includes("Just a moment") || title.includes("Security")) {
@@ -108,47 +107,61 @@ app.post('/login', async (req, res) => {
         if(finalTitle.includes("Just a moment")) {
              const shot = await page.screenshot({ encoding: 'base64' });
              await globalBrowser.close();
-             return res.status(403).json({ status: "error", message: "Proxy'ye rağmen CF geçilemedi.", debug_image: `<img src="data:image/png;base64,${shot}" />` });
+             return res.status(403).json({ status: "error", message: "Cloudflare geçilemedi.", debug_image: `<img src="data:image/png;base64,${shot}" />` });
         }
 
         console.log('Form bekleniyor...');
-        // Formun gelmesini 60 saniye bekle
         await page.waitForSelector('#username', { visible: true, timeout: 60000 });
 
         console.log('Bilgiler giriliyor...');
         await page.type('#username', username, { delay: 150 });
         await page.type('#password', password, { delay: 150 });
         
-        console.log('Giriş yapılıyor (Timeout: 120sn)...');
+        console.log('Giriş yapılıyor...');
+        
+        // BURASI KRİTİK: Navigation Timeout olsa bile hata verme, devam et!
         await Promise.all([
             page.click('#userLoginSubmitButton'),
-            // KRİTİK DEĞİŞİKLİK: Giriş sonrası yüklemeyi 120 saniye (2dk) bekle
-            page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 120000 }),
+            page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 120000 })
+                .catch(e => console.log("⚠️ Navigasyon zaman aşımı (Önemsiz, devam ediliyor...)"))
         ]);
 
+        // Biraz bekle ki sayfa otursun
+        await new Promise(r => setTimeout(r, 5000));
+
         const content = await page.content();
-        // "wrong password" veya "hatalı" kelimelerini kontrol etmek iyi olabilir
         
+        // SMS Kontrolü
         if (content.includes("Doğrulama Kodu") || content.includes("verification code")) {
             console.log('SMS İstendi.');
             const shot = await page.screenshot({ encoding: 'base64' });
             return res.json({ 
                 status: "sms_required", 
-                message: "SMS kodu gerekli. /submit-sms kullanın.",
+                message: "SMS kodu gerekli.",
                 debug_image: `<img src="data:image/png;base64,${shot}" />`
             });
         }
 
+        // Başarılı mı?
         const cookies = await page.cookies();
         fs.writeFileSync(COOKIE_PATH, JSON.stringify(cookies, null, 2));
         
+        // Başarı durumunda bile ne gördüğünü çekelim (Emin olmak için)
+        const shot = await page.screenshot({ encoding: 'base64' });
+
         await globalBrowser.close();
-        res.json({ status: "success", message: "Giriş Başarılı!" });
+        res.json({ 
+            status: "success", 
+            message: "Giriş Başarılı!", 
+            debug_image: `<img src="data:image/png;base64,${shot}" />` // Nereye girdiğini gör
+        });
 
     } catch (error) {
         console.error("Hata:", error.message);
         let img = "";
+        // Hata anında ekran görüntüsü al
         try { if(globalPage) img = await globalPage.screenshot({ encoding: 'base64' }); } catch(e){}
+        
         if(globalBrowser) await globalBrowser.close();
         res.status(500).json({ status: "error", error: error.message, debug_image: `<img src="data:image/png;base64,${img}" />` });
     }
@@ -158,7 +171,6 @@ app.post('/login', async (req, res) => {
 app.post('/submit-sms', async (req, res) => {
     const { code } = req.body;
     try {
-        // Eğer globalBrowser kapandıysa tekrar açıp session'ı (userDataDir) kullanarak devam et
         console.log("SMS Onayı için tarayıcı açılıyor...");
         globalBrowser = await startBrowser();
         const page = await globalBrowser.newPage();
@@ -168,13 +180,13 @@ app.post('/submit-sms', async (req, res) => {
         await page.goto('https://secure.sahibinden.com/giris', { waitUntil: 'networkidle2', timeout: 90000 });
 
         console.log("SMS Kodu yazılıyor...");
-        // Genel input araması (ID değişebilir)
         await page.waitForSelector('input[type="text"]', { timeout: 60000 });
         await page.type('input[type="text"]', code, { delay: 200 });
         
         await Promise.all([
             page.click('button[type="submit"]'), 
             page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 120000 })
+                 .catch(e => console.log("SMS sonrası navigasyon timeout (Önemsiz)"))
         ]);
         
         const cookies = await page.cookies();
@@ -183,7 +195,9 @@ app.post('/submit-sms', async (req, res) => {
         await globalBrowser.close();
         res.json({ status: "success", message: "SMS Onaylandı." });
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        let img = "";
+        try { if(globalPage) img = await globalPage.screenshot({ encoding: 'base64' }); } catch(e){}
+        res.status(500).json({ error: error.message, debug_image: `<img src="data:image/png;base64,${img}" />` });
     }
 });
 
@@ -198,12 +212,18 @@ app.post('/get-messages', async (req, res) => {
         browser = await startBrowser();
         const page = await browser.newPage();
         await page.authenticate({ username: PROXY_USER, password: PROXY_PASS });
-
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         await page.setCookie(...cookies);
 
         console.log('Mesajlara gidiliyor...');
         await page.goto('https://banaozel.sahibinden.com/mesajlarim', { waitUntil: 'domcontentloaded', timeout: 120000 });
+
+        // Cloudflare kontrol
+        for(let i=0; i<2; i++) {
+             const title = await page.title();
+             if(title.includes("Just a moment")) await solveCloudflare(page);
+             else break;
+        }
 
         if (page.url().includes('giris')) {
              await browser.close();
@@ -219,7 +239,9 @@ app.post('/get-messages', async (req, res) => {
                 rows.forEach(row => {
                     const isUnread = row.classList.contains('unread') || row.querySelector('strong') !== null;
                     const text = row.innerText.replace(/\n/g, ' | ').trim();
-                    if(text.length > 5) data.push({ raw: text, isUnread });
+                    const linkElement = row.querySelector('a');
+                    const link = linkElement ? linkElement.href : null;
+                    if(text.length > 5) data.push({ raw: text, isUnread, link });
                 });
             }
             return data;
@@ -235,4 +257,39 @@ app.post('/get-messages', async (req, res) => {
     }
 });
 
-app.listen(3000, () => console.log('Proxy V10.1 (High Latency Fix) Hazır.'));
+// --- CEVAP YAZMA ---
+app.post('/send-reply', async (req, res) => {
+    const { messageLink, replyText } = req.body;
+    let browser;
+    try {
+        if (!fs.existsSync(COOKIE_PATH)) return res.status(401).json({ error: "Giriş yapılmamış" });
+        const cookies = JSON.parse(fs.readFileSync(COOKIE_PATH));
+
+        browser = await startBrowser();
+        const page = await browser.newPage();
+        await page.authenticate({ username: PROXY_USER, password: PROXY_PASS });
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+        await page.setCookie(...cookies);
+
+        console.log('Sohbet detayına gidiliyor...');
+        await page.goto(messageLink, { waitUntil: 'domcontentloaded', timeout: 120000 });
+        
+        const textareaSelector = 'textarea'; 
+        await page.waitForSelector(textareaSelector, { timeout: 30000 });
+        await page.type(textareaSelector, replyText);
+        
+        console.log('Gönderiliyor...');
+        await page.click('button[type="submit"]'); 
+        await page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 60000 }).catch(e=>console.log("Gönderim timeout (Önemsiz)"));
+
+        res.json({ success: true, message: "Cevap gönderildi." });
+
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ success: false, error: error.message });
+    } finally {
+        if (browser) await browser.close();
+    }
+});
+
+app.listen(3000, () => console.log('Proxy V10.2 (Patient Mode) Hazır.'));
