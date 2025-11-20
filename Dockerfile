@@ -1,6 +1,6 @@
 FROM node:18-slim
 
-# Gerekli Chrome kütüphanelerini yükle (Xvfb olmadan, hafif kurulum)
+# Gerekli Chrome kütüphaneleri (Xvfb yok, hafif)
 RUN apt-get update \
     && apt-get install -y wget gnupg \
     && wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - \
@@ -19,5 +19,4 @@ COPY . .
 
 EXPOSE 3000
 
-# Standart başlatma (Sanal ekransız)
 CMD ["node", "index.js"]
