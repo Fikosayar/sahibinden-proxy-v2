@@ -7,6 +7,7 @@ puppeteer.use(StealthPlugin());
 const app = express();
 app.use(express.json({ limit: '50mb' }));
 
+// Oturum verileri burada saklanacak (Sunucu kapansa da gitmez)
 const USER_DATA_DIR = '/tmp/chrome_data_v12'; 
 const COOKIE_PATH = '/tmp/cookies.json';
 
@@ -18,16 +19,15 @@ const PROXY_PASS = 'hqrh1cvutdb1';
 
 let globalBrowser = null;
 
-// Tarayıcıyı Hafif Modda Başlat
 async function startBrowser() {
-    console.log('>>> Tarayıcı (V12 - Hafif & Proxy) başlatılıyor...');
+    console.log('>>> Tarayıcı (V12 - Lightweight) başlatılıyor...');
     return await puppeteer.launch({
-        headless: "new", // HAFİF MOD (CPU/RAM Dostu)
+        headless: "new", // HAFİF MOD (RAM Dostu)
         userDataDir: USER_DATA_DIR,
         args: [
             '--no-sandbox', 
             '--disable-setuid-sandbox', 
-            '--disable-dev-shm-usage', // RAM yerine diski kullanır, çökmez
+            '--disable-dev-shm-usage', // RAM yerine disk kullanır
             '--disable-accelerated-2d-canvas',
             '--disable-gpu',
             '--window-size=1920,1080',
@@ -42,19 +42,18 @@ async function startBrowser() {
 // --- LOGIN ---
 app.post('/login', async (req, res) => {
     const { username, password } = req.body;
-    
     try {
         if (globalBrowser) await globalBrowser.close();
         globalBrowser = await startBrowser();
         const page = await globalBrowser.newPage();
 
-        console.log('Proxy girişi yapılıyor...');
+        console.log('Proxy kimlik doğrulaması...');
         await page.authenticate({ username: PROXY_USER, password: PROXY_PASS });
-
+        
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
 
         console.log('Giriş sayfasına gidiliyor...');
-        // Proxy yavaş olabilir, 3 dakika bekleme süresi
+        // Proxy yavaş olabilir diye süreyi uzun tutuyoruz (3dk)
         await page.goto('https://secure.sahibinden.com/giris', { waitUntil: 'domcontentloaded', timeout: 180000 });
 
         console.log('Form bekleniyor...');
@@ -62,10 +61,9 @@ app.post('/login', async (req, res) => {
         try {
             await page.waitForSelector('#username', { visible: true, timeout: 60000 });
         } catch(e) {
-            // Form gelmediyse muhtemelen Cloudflare vardır, ekranı çek
             const shot = await page.screenshot({ encoding: 'base64' });
             await globalBrowser.close();
-            return res.status(500).json({ status: "error", message: "Form bulunamadı (CF olabilir).", debug_image: `<img src="data:image/png;base64,${shot}" />` });
+            return res.status(500).json({ status: "error", message: "Form bulunamadı (Proxy yavaş veya CF engeli).", debug_image: `<img src="data:image/png;base64,${shot}" />` });
         }
 
         console.log('Bilgiler giriliyor...');
@@ -75,11 +73,10 @@ app.post('/login', async (req, res) => {
         console.log('Butona basılıyor...');
         await Promise.all([
             page.click('#userLoginSubmitButton'),
-            // Navigasyon hatası olsa bile devam et (Timeout yememesi için)
-            page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 120000 }).catch(() => console.log("Navigasyon timeout (devam)"))
+            // Navigasyon timeout olsa bile devam et (catch bloğu)
+            page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 120000 }).catch(()=>console.log("Navigasyon timeout (Devam ediliyor)"))
         ]);
-
-        // Sayfanın oturması için biraz bekle
+        
         await new Promise(r => setTimeout(r, 5000));
 
         const content = await page.content();
@@ -88,38 +85,30 @@ app.post('/login', async (req, res) => {
         if (content.includes("Doğrulama Kodu") || content.includes("verification code")) {
             console.log('SMS İstendi!');
             const shot = await page.screenshot({ encoding: 'base64' });
-            return res.json({ 
-                status: "sms_required", 
-                message: "SMS kodu gerekli. /submit-sms kullanın.",
-                debug_image: `<img src="data:image/png;base64,${shot}" />`
-            });
+            // Browser'ı kapatmıyoruz ki SMS oturumu devam etsin (veya userDataDir'den hatırlar)
+            await globalBrowser.close(); 
+            return res.json({ status: "sms_required", debug_image: `<img src="data:image/png;base64,${shot}" />` });
         }
 
-        // Hatalı şifre vs kontrolü
+        // Hata Kontrolü
         if (content.includes("hatalı") || content.includes("error")) {
-            const shot = await page.screenshot({ encoding: 'base64' });
-            // Hata olsa bile cookie kaydedelim, belki girmiştir
+             const shot = await page.screenshot({ encoding: 'base64' });
+             await globalBrowser.close();
+             return res.status(400).json({ status: "error", message: "Şifre hatalı olabilir.", debug_image: `<img src="data:image/png;base64,${shot}" />` });
         }
 
+        // Başarılı
         const cookies = await page.cookies();
         fs.writeFileSync(COOKIE_PATH, JSON.stringify(cookies, null, 2));
         
-        // Başarılı ekranı çek
         const shot = await page.screenshot({ encoding: 'base64' });
         await globalBrowser.close();
-        
-        res.json({ 
-            status: "success", 
-            message: "Giriş Başarılı!", 
-            debug_image: `<img src="data:image/png;base64,${shot}" />` 
-        });
+        res.json({ status: "success", message: "Giriş Başarılı!", debug_image: `<img src="data:image/png;base64,${shot}" />` });
 
     } catch (error) {
         console.error(error);
-        let img = "";
-        try { if(globalBrowser) img = await globalBrowser.pages()[0].screenshot({ encoding: 'base64' }); } catch(e){}
         if(globalBrowser) await globalBrowser.close();
-        res.status(500).json({ status: "error", error: error.message, debug_image: `<img src="data:image/png;base64,${img}" />` });
+        res.status(500).json({ error: error.message });
     }
 });
 
@@ -127,14 +116,15 @@ app.post('/login', async (req, res) => {
 app.post('/submit-sms', async (req, res) => {
     const { code } = req.body;
     try {
-        console.log("SMS için tarayıcı açılıyor...");
+        console.log("SMS onayı yapılıyor...");
         globalBrowser = await startBrowser();
         const page = await globalBrowser.newPage();
         await page.authenticate({ username: PROXY_USER, password: PROXY_PASS });
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         
         await page.goto('https://secure.sahibinden.com/giris', { waitUntil: 'domcontentloaded', timeout: 90000 });
-
+        
+        console.log("Kodu yazıyorum...");
         await page.waitForSelector('input[type="text"]', { timeout: 60000 });
         await page.type('input[type="text"]', code, { delay: 200 });
         
@@ -158,7 +148,7 @@ app.post('/get-messages', async (req, res) => {
     const { filter } = req.body;
     let browser;
     try {
-        if (!fs.existsSync(COOKIE_PATH)) return res.status(401).json({ error: "Giriş yapılmamış." });
+        if (!fs.existsSync(COOKIE_PATH)) return res.status(401).json({ error: "Giriş yapılmamış" });
         const cookies = JSON.parse(fs.readFileSync(COOKIE_PATH));
 
         browser = await startBrowser();
@@ -172,7 +162,7 @@ app.post('/get-messages', async (req, res) => {
 
         if (page.url().includes('giris')) {
              await browser.close();
-             return res.status(401).json({ status: "session_expired", message: "Tekrar /login yapın." });
+             return res.status(401).json({ status: "session_expired" });
         }
 
         await page.waitForSelector('body', {timeout: 60000});
@@ -201,6 +191,37 @@ app.post('/get-messages', async (req, res) => {
     }
 });
 
-// ... (send-reply fonksiyonu da buraya eklenebilir, yukarıdaki mesajlarda vardı) ...
+// --- CEVAP YAZMA ---
+app.post('/send-reply', async (req, res) => {
+    const { messageLink, replyText } = req.body;
+    let browser;
+    try {
+        if (!fs.existsSync(COOKIE_PATH)) return res.status(401).json({ error: "Giriş yapılmamış" });
+        const cookies = JSON.parse(fs.readFileSync(COOKIE_PATH));
 
-app.listen(3000, () => console.log('Proxy V12 (Lightweight) Hazır.'));
+        browser = await startBrowser();
+        const page = await browser.newPage();
+        await page.authenticate({ username: PROXY_USER, password: PROXY_PASS });
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+        await page.setCookie(...cookies);
+
+        console.log('Sohbete gidiliyor...');
+        await page.goto(messageLink, { waitUntil: 'domcontentloaded', timeout: 120000 });
+        
+        const textareaSelector = 'textarea'; 
+        await page.waitForSelector(textareaSelector, { timeout: 30000 });
+        
+        await page.type(textareaSelector, replyText);
+        await page.click('button[type="submit"]'); 
+        
+        await page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 60000 }).catch(()=>{});
+
+        res.json({ success: true, message: "Cevap gönderildi." });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    } finally {
+        if (browser) await browser.close();
+    }
+});
+
+app.listen(3000, () => console.log('Proxy V12 (Lightweight + Proxy) Hazır.'));
